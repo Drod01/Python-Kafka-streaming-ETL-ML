@@ -1,0 +1,75 @@
+name: wellstream
+
+x-wellstream: &wellstream
+  build: .
+  environment:
+    KAFKA_BOOTSTRAP: redpanda:9092
+    KAFKA_TOPIC: well.telemetry
+    POSTGRES_DSN: postgresql://wellstream:wellstream@postgres:5432/wellstream
+    MODEL_PATH: /app/models/anomaly_logit.json
+  volumes:
+    - models:/app/models
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wellstream
+      POSTGRES_PASSWORD: wellstream
+      POSTGRES_DB: wellstream
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wellstream -d wellstream"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  trainer:
+    <<: *wellstream
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["train", "--model", "/app/models/anomaly_logit.json"]
+
+  producer:
+    <<: *wellstream
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    command: ["python", "scripts/produce.py", "--rate", "120"]
+
+  processor:
+    <<: *wellstream
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      trainer:
+        condition: service_completed_successfully
+    command: ["run", "--kafka", "redpanda:9092", "--report-seconds", "15"]
+
+volumes:
+  models:
